@@ -6,7 +6,7 @@ This project uses the pre-processed streets.geojson. Pre-processing is done via 
 
 # To get the project running, execute following commands:
 python -m venv .venv
-# Then in Windows PowerShell:
+## Then in Windows PowerShell:
 .\\.venv\Scripts\Activate.ps1 </br>
 pip install -r requirements.txt </br>
 streamlit run app.py
