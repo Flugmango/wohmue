@@ -1,0 +1,457 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+
+    #map {
+      height: 92vh;
+      width: 100%;
+      border-radius: 12px;
+    }
+
+    .panel {
+      background: white;
+      padding: 10px 12px;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-height: 70vh;
+      overflow: auto;
+      width: 320px;
+    }
+
+    .panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .factor {
+      border-top: 1px solid #eee;
+      padding-top: 8px;
+      margin-top: 8px;
+    }
+
+    .factor label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .factor input[type="range"] {
+      width: 100%;
+    }
+
+    .muted {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+
+    .legend {
+      background: white;
+      padding: 8px 10px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+      font-size: 13px;
+    }
+
+    .legend .lrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      display: inline-block;
+      border: 1px solid #999;
+    }
+
+    .panel .btnrow {
+      display: flex;
+      gap: 8px;
+      margin: 10px 0 6px;
+      flex-wrap: wrap;
+    }
+
+    .panel button {
+      border: 1px solid #ddd;
+      background: #f7f7f7;
+      padding: 6px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .panel button:hover {
+      background: #efefef;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <script>
+    const streets = __STREETS__;
+    const cfg = __CFG__;
+    // Keep defaults for reset actions
+    const DEFAULT_SELECTED = JSON.parse(JSON.stringify(cfg.selected));
+    const DEFAULT_WEIGHTS = JSON.parse(JSON.stringify(cfg.weights));
+
+    // Init map
+    const map = L.map('map', { zoomControl: true });
+
+    // --- Basemap layers ---
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    });
+
+    const cartoLight = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd',
+      maxZoom: 20,
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+    });
+
+    const cartoDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd',
+      maxZoom: 20,
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+    });
+
+    // Choose default basemap:
+    cartoLight.addTo(map);
+
+    // Basemap switch UI (top-left by default)
+    const baseMaps = {
+      "CARTO Light": cartoLight,
+      "OpenStreetMap": osm,
+      "CARTO Dark": cartoDark
+    };
+
+    L.control.layers(baseMaps, null, { collapsed: true, position: "topleft" }).addTo(map);
+
+    // Zoom values for dynamic feature scaling
+    let zoomWeight = 3;
+    let zoomOpacity = 0.9;
+
+    function computeScore(props) {
+      let s = 0;
+      for (const [k, isOn] of Object.entries(cfg.selected)) {
+        if (!isOn) continue;
+        const w = cfg.weights[k] ?? 0;
+        s += (props[k] ? 1 : 0) * w;
+      }
+      return s;
+    }
+
+    function computeFactorText(props) {
+      const labels = [];
+      for (const [k, isOn] of Object.entries(cfg.selected)) {
+        if (!isOn) continue;
+        if (props[k]) labels.push(cfg.factorLabels[k] ?? k);
+      }
+      return labels.length ? labels.join(", ") : "Keine ausgewählten Faktoren vorhanden";
+    }
+
+    function isHitByAnyActiveFactor(props) {
+      for (const [k, isOn] of Object.entries(cfg.selected)) {
+        if (!isOn) continue;
+        if (props[k]) return true;
+      }
+      return false;
+    }
+
+    function colorForScore(score) {
+      if (score >= 4) return "green";
+      if (score >= 2) return "yellow";
+      if (score >= 0) return "orange";
+      return "red";
+    }
+
+    function styleFn(feature) {
+      const props = feature.properties;
+      const hit = isHitByAnyActiveFactor(props);
+
+      if (!hit) return { opacity: 0, weight: 0, interactive: false };
+
+      const score = computeScore(props);
+      return { color: colorForScore(score), weight: zoomWeight, opacity: zoomOpacity, interactive: true };
+    }
+
+    // ---- Selection + hover highlighting state ----
+    let selectedLayer = null;
+
+    function highlightLayer(lyr) {
+      lyr.setStyle({ weight: 7, opacity: 1.0 });
+      if (lyr.bringToFront) lyr.bringToFront();
+    }
+
+    function resetLayerStyle(lyr) {
+      layer.resetStyle(lyr); // uses styleFn (current cfg)
+    }
+
+    // Throttle restyle for smooth sliders
+    let restyleQueued = false;
+    function requestRestyle() {
+      if (restyleQueued) return;
+      restyleQueued = true;
+      requestAnimationFrame(() => {
+        restyleQueued = false;
+        restyle();
+      });
+    }
+
+    // Create layer once (Canvas renderer)
+    const layer = L.geoJSON(streets, {
+      renderer: L.canvas({ padding: 0.5 }),
+      style: styleFn,
+      onEachFeature: (feature, lyr) => {
+        function isInteractive() {
+          return lyr.options.interactive !== false && lyr.options.weight !== 0 && lyr.options.opacity !== 0;
+        }
+
+        lyr.on('mouseover', (e) => {
+          if (!isInteractive()) return;
+          if (selectedLayer && selectedLayer === lyr) return;
+
+          highlightLayer(lyr);
+
+          // Lazy tooltip (computed on hover)
+          const factors = computeFactorText(feature.properties);
+          lyr.bindTooltip(factors, { sticky: true }).openTooltip();
+        });
+
+        lyr.on('mouseout', () => {
+          if (selectedLayer && selectedLayer === lyr) return;
+
+          try { lyr.closeTooltip(); } catch (e) { }
+          try { lyr.unbindTooltip(); } catch (e) { }
+          resetLayerStyle(lyr);
+        });
+
+        lyr.on('click', (e) => {
+          if (!isInteractive()) return;
+
+          if (selectedLayer && selectedLayer !== lyr) {
+            resetLayerStyle(selectedLayer);
+            try { selectedLayer.closeTooltip(); } catch (e2) { }
+          }
+
+          selectedLayer = lyr;
+          highlightLayer(lyr);
+
+          // Lazy popup (computed on click)
+          const props = feature.properties;
+          const score = computeScore(props);
+          const factors = computeFactorText(props);
+          lyr.bindPopup(`<b>Wohlfühl-Score:</b> ${score.toFixed(2)}<br/><b>Faktoren:</b> ${factors}`).openPopup();
+
+          L.DomEvent.stopPropagation(e);
+        });
+      }
+    }).addTo(map);
+
+    // Fit bounds
+    try { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); }
+    catch (e) { map.setView([51.96, 7.63], 13); }
+
+    // Click map background clears selection
+    map.on('click', () => {
+      if (selectedLayer) {
+        resetLayerStyle(selectedLayer);
+        selectedLayer = null;
+      }
+    });
+
+    // Restyle only changes style (fast). Popups/tooltips are lazy on hover/click.
+    function restyle() {
+      layer.setStyle(styleFn);
+      if (selectedLayer) highlightLayer(selectedLayer);
+    }
+
+    function updateZoomStyling() {
+      const z = map.getZoom();
+
+      // tweak these to taste
+      if (z <= 12) { zoomWeight = 1; zoomOpacity = 0.45; }
+      else if (z === 13) { zoomWeight = 2; zoomOpacity = 0.55; }
+      else if (z === 14) { zoomWeight = 3; zoomOpacity = 0.7; }
+      else if (z === 15) { zoomWeight = 4; zoomOpacity = 0.85; }
+      else { zoomWeight = 5; zoomOpacity = 0.95; }
+
+      restyle();
+    }
+
+    map.on('zoomend', updateZoomStyling);
+
+    // set initial values based on initial zoom
+    updateZoomStyling();
+
+    // Leaflet control panel (no Streamlit widgets -> no reruns)
+    const Panel = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function () {
+        const div = L.DomUtil.create('div', 'panel');
+        div.innerHTML = `<h3>Faktoren</h3>
+        <div class="btnrow">
+          <button type="button" id="btnEnableAll">Alle an</button>
+          <button type="button" id="btnDisableAll">Alle aus</button>
+          <button type="button" id="btnResetWeights">Gewichte zurücksetzen</button>
+        </div>
+
+        <div id="factorList"></div>
+      `;
+
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+
+        const list = div.querySelector('#factorList');
+
+        function syncUIFromCfg() {
+          // update checkboxes
+          list.querySelectorAll('input[type="checkbox"][data-k]').forEach(cb => {
+            const k = cb.getAttribute('data-k');
+            cb.checked = !!cfg.selected[k];
+          });
+
+          // update sliders + text
+          list.querySelectorAll('input[type="range"][data-w]').forEach(sl => {
+            const k = sl.getAttribute('data-w');
+            const v = cfg.weights[k] ?? 0;
+            sl.value = v;
+            const out = list.querySelector(`span[data-wv="${k}"]`);
+            if (out) out.textContent = Number(v).toFixed(1);
+          });
+        }
+
+        function clearSelectionIfHidden() {
+          if (!selectedLayer) return;
+          const props = selectedLayer.feature.properties;
+          if (!isHitByAnyActiveFactor(props)) {
+            resetLayerStyle(selectedLayer);
+            selectedLayer = null;
+          }
+        }
+
+        // Button wiring
+        div.querySelector('#btnEnableAll').addEventListener('click', () => {
+          for (const k of Object.keys(cfg.selected)) cfg.selected[k] = true;
+          syncUIFromCfg();
+          restyle();
+        });
+
+        div.querySelector('#btnDisableAll').addEventListener('click', () => {
+          for (const k of Object.keys(cfg.selected)) cfg.selected[k] = false;
+          syncUIFromCfg();
+          clearSelectionIfHidden();
+          restyle();
+        });
+
+        div.querySelector('#btnResetWeights').addEventListener('click', () => {
+          cfg.weights = JSON.parse(JSON.stringify(DEFAULT_WEIGHTS));
+          syncUIFromCfg();
+          requestRestyle(); // smooth
+        });
+
+        for (const k of Object.keys(cfg.factorLabels)) {
+          const label = cfg.factorLabels[k];
+          const checked = cfg.selected[k] ? "checked" : "";
+          const w = cfg.weights[k] ?? 0;
+
+          const item = document.createElement('div');
+          item.className = "factor";
+          item.innerHTML = `
+          <div class="row">
+            <label>
+              <input type="checkbox" data-k="${k}" ${checked}/>
+              <span>${label}</span>
+            </label>
+            <div>
+              <input type="range" min="-3" max="3" step="0.5" value="${w}" data-w="${k}"/>
+              <div class="muted">Gewicht: <span data-wv="${k}">${w}</span></div>
+            </div>
+          </div>
+        `;
+          list.appendChild(item);
+        }
+
+        // event wiring
+        list.addEventListener('input', (ev) => {
+          const t = ev.target;
+
+          if (t.matches('input[type="checkbox"][data-k]')) {
+            const k = t.getAttribute('data-k');
+            cfg.selected[k] = t.checked;
+
+            // if current selection became hidden, clear it
+            if (selectedLayer) {
+              const props = selectedLayer.feature.properties;
+              if (!isHitByAnyActiveFactor(props)) {
+                resetLayerStyle(selectedLayer);
+                selectedLayer = null;
+              }
+            }
+
+            restyle(); // immediate for checkbox
+          }
+
+          if (t.matches('input[type="range"][data-w]')) {
+            const k = t.getAttribute('data-w');
+            const v = parseFloat(t.value);
+            cfg.weights[k] = v;
+
+            const out = list.querySelector(`span[data-wv="${k}"]`);
+            if (out) out.textContent = v.toFixed(1);
+
+            requestRestyle(); // smooth for sliders
+          }
+        });
+
+        return div;
+      }
+    });
+    map.addControl(new Panel());
+
+    // Legend
+    const legend = L.control({ position: 'bottomleft' });
+    legend.onAdd = function () {
+      const div = L.DomUtil.create('div', 'legend');
+      div.innerHTML = `
+      <div><b>Wohlfühl-Score</b></div>
+      <div class="lrow"><span class="swatch" style="background:green"></span> hoch (>= 4)</div>
+      <div class="lrow"><span class="swatch" style="background:yellow"></span> mittel (2 - 3,5)</div>
+      <div class="lrow"><span class="swatch" style="background:orange"></span> mäßig (0 - 1,5)</div>
+      <div class="lrow"><span class="swatch" style="background:red"></span> niedrig (< 0)</div>
+      <div class="lrow">Straßen ohne aktiven Faktor sind ausgeblendet</div>
+      <div class="lrow">Der Wohlfuehl-Faktor berechnet sich aus der Summe der gewichteten Teilsummen</div>
+    `;
+      return div;
+    };
+    legend.addTo(map);
+
+    restyle();
+  </script>
+</body>
+
+</html>
